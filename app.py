@@ -2,20 +2,12 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
+from typing import Tuple
 
 import nunes_pumping as n
 
-st.set_page_config(page_title="Cryogenic Pumping Line Calculator", layout="wide")
-st.title("Cryogenic Pumping Line Calculator (Nunes chapter, section-by-section)")
-
-st.markdown("""
-This calculator models a cryogenic pumping line as a **series of sections** (Fig. 2.15 style),
-and draws a stepped technical schematic (Fig. 2.16 style).
-
-- Each section has: **length (cm), diameter (cm), T_in (K), T_out (K)**
-- You provide: **cold-end pressure P0 (torr)** and **mass flow Qm (g/s)**
-- The app computes **P_in → P_out** across each section and overlays pressures on the schematic.
-""")
+st.set_page_config(page_title="Pumping Line Calculator", layout="wide")
+st.title("Pumping Line Calculator")
 
 DEFAULT_SECTIONS = pd.DataFrame([
     {"name":"L1", "length_cm":10.0,  "diameter_cm":1.27, "T_in_K":0.3, "T_out_K":1.2,  "substeps":20},
@@ -24,37 +16,87 @@ DEFAULT_SECTIONS = pd.DataFrame([
 ])
 
 # ----------------------------
-# Sidebar inputs
+# Sidebar inputs (with clear descriptions)
 # ----------------------------
 with st.sidebar:
-    st.header("Global inputs")
+    st.header("Inputs")
 
-    gas_choice = st.selectbox("Gas", ["He3", "He4"], index=0)
+    gas_choice = st.selectbox(
+        "Helium isotope",
+        ["He3", "He4"],
+        index=0,
+        help="Choose the helium isotope used in the pumping line."
+    )
     gas = n.HE3 if gas_choice == "He3" else n.HE4
 
-    Qm = st.number_input("Mass flow Qm (g/s)", value=1.8e-5, format="%.6g")
-    P0 = st.number_input("Cold-end pressure P0 (torr)", value=1.9e-3, format="%.6g")
-    T0 = st.number_input("Cold-end temperature T0 (K)", value=0.3, format="%.6g")
+    Qm = st.number_input(
+        "Mass flow (g/s)",
+        value=1.8e-5,
+        format="%.6g",
+        help="How many grams of helium per second move through the pumping line (steady-state). "
+             "If you don't know this, you typically estimate it from cooling power + latent heat."
+    )
+    P0 = st.number_input(
+        "Cold-end pressure (torr)",
+        value=1.9e-3,
+        format="%.6g",
+        help="Pressure at the cold end of the pumping line (at the coldest stage)."
+    )
+    T0 = st.number_input(
+        "Cold-end temperature (K)",
+        value=0.3,
+        format="%.6g",
+        help="Temperature at the cold end. Used for the design check summary."
+    )
 
-    st.header("Model options")
-    eta_model = st.selectbox("Viscosity model for Eq (2.14)", ["accurate", "simple"], index=0)
-    end_corr = st.checkbox("Apply short-tube correction in molecular flow (Eq 2.11 idea)", value=True)
+    st.header("Model settings")
+    eta_model = st.selectbox(
+        "Viscosity model",
+        ["accurate", "simple"],
+        index=0,
+        help="Controls how helium viscosity depends on temperature for the non-molecular calculation."
+    )
+    end_corr = st.checkbox(
+        "Short-tube correction (molecular flow)",
+        value=True,
+        help="Improves accuracy when a tube segment is short compared to its diameter."
+    )
 
-    st.header("Pump block (optional)")
-    show_pump = st.checkbox("Compute pump inlet pressure from pump speed (q = pS)", value=True)
-    Tp = st.number_input("Pump inlet temperature (K)", value=300.0, format="%.3f")
-    S = st.number_input("Pump speed S (L/s)", value=500.0, format="%.6g")
-    Pback = st.number_input("Pump outlet/backing pressure (torr) (display only)", value=760.0, format="%.6g")
+    st.header("Pump (optional)")
+    show_pump = st.checkbox(
+        "Compute pump inlet pressure from pump speed",
+        value=True,
+        help="Uses q = p·S to estimate the pressure at the pump inlet for the chosen mass flow."
+    )
+    Tp = st.number_input(
+        "Pump inlet temperature (K)",
+        value=300.0,
+        format="%.3f",
+        help="Temperature of the gas at the pump inlet (usually room temperature)."
+    )
+    S = st.number_input(
+        "Pump speed S (L/s)",
+        value=500.0,
+        format="%.6g",
+        help="Pump speed at the pump inlet, in liters per second."
+    )
+    Pback = st.number_input(
+        "Pump outlet/backing pressure (torr) (display only)",
+        value=760.0,
+        format="%.6g",
+        help="This app displays this value but does not currently simulate the backing line."
+    )
 
     st.header("Solve for unknown")
     solve_mode = st.selectbox(
         "Mode",
         ["Forward: compute pressures", "Solve: diameter of one section"],
-        index=0
+        index=0,
+        help="Forward = compute pressures for your current geometry. Solve = choose a section and solve for its diameter."
     )
 
 # ----------------------------
-# State
+# Session state
 # ----------------------------
 if "segments_df" not in st.session_state:
     st.session_state["segments_df"] = DEFAULT_SECTIONS.copy()
@@ -87,10 +129,10 @@ def build_segments(df: pd.DataFrame):
 
 
 def make_diagram(segments, pressures=None):
-    """Stepped schematic like Fig. 2.16. Draws each segment as a rectangle."""
+    """Stepped schematic. Uses length as horizontal width and diameter as vertical height."""
     if not segments:
         fig, ax = plt.subplots(figsize=(10, 3))
-        ax.text(0.5, 0.5, "No segments", ha="center", va="center")
+        ax.text(0.5, 0.5, "No sections defined", ha="center", va="center")
         ax.axis("off")
         return fig
 
@@ -106,17 +148,14 @@ def make_diagram(segments, pressures=None):
         d = seg.diameter_cm
         L = seg.length_cm
 
-        # Tube outline
         ax.add_patch(Rectangle((x, -d/2), L, d, fill=False, linewidth=2))
 
-        # Segment label
         ax.text(
             x + L/2, d/2 + 0.12*max_D,
-            f"{seg.name}  (L={L:g} cm, D={d:g} cm)\nT: {seg.T_in_K:g} → {seg.T_out_K:g} K",
+            f"{seg.name}  L={L:g} cm, D={d:g} cm\nT: {seg.T_in_K:g}→{seg.T_out_K:g} K",
             ha="center", va="bottom", fontsize=8
         )
 
-        # Pressure at left node
         if pressures is not None and i < len(pressures):
             ax.text(
                 x, -d/2 - 0.18*max_D,
@@ -126,7 +165,6 @@ def make_diagram(segments, pressures=None):
 
         x += L
 
-    # Pressure at final node
     if pressures is not None:
         ax.text(
             total_L, -max_D/2 - 0.18*max_D,
@@ -137,12 +175,11 @@ def make_diagram(segments, pressures=None):
     ax.set_xlim(0, total_L)
     ax.set_ylim(-max_D, max_D)
     ax.axis("off")
-    ax.set_title("Pumping line schematic (stepped sections, Fig. 2.16 style)", fontsize=12)
+    ax.set_title("Pumping line schematic", fontsize=12)
     return fig
 
 
 def run_forward_compute(segments):
-    """Compute pressures and store results in session_state."""
     st.session_state["last_error"] = None
     try:
         pressures, diags = n.propagate_line(
@@ -161,14 +198,15 @@ def run_forward_compute(segments):
         st.session_state["last_error"] = str(e)
 
 
-def solve_diameter_for_target_end_pressure(df: pd.DataFrame, target_end_pressure_torr: float, section_name: str,
-                                          dmin_cm: float, dmax_cm: float, max_iter: int = 50) -> Tuple[float, str]:
-    """
-    Solve for diameter of one section so that final pressure P_end matches target_end_pressure_torr.
-    Uses bisection on diameter. Assumes P_end increases with diameter (true for this model).
-    """
-    if dmin_cm <= 0 or dmax_cm <= dmin_cm:
-        return None, "Diameter bounds invalid."
+def solve_diameter_for_target_end_pressure(
+    df: pd.DataFrame,
+    target_end_pressure_torr: float,
+    section_name: str,
+    dmin_cm: float,
+    dmax_cm: float,
+    max_iter: int = 60
+) -> Tuple[float | None, str]:
+    """Bisection solve for one section diameter such that final pressure matches target."""
 
     def compute_endP_for_d(d_cm: float) -> float:
         df2 = df.copy()
@@ -185,20 +223,20 @@ def solve_diameter_for_target_end_pressure(df: pd.DataFrame, target_end_pressure
             )
             return pressures[-1]
         except n.InfeasibleFlowError:
-            # If infeasible, treat as "too restrictive": end pressure effectively ~0
             return 0.0
+
+    if dmin_cm <= 0 or dmax_cm <= dmin_cm:
+        return None, "Diameter bounds are invalid."
 
     lo, hi = dmin_cm, dmax_cm
     f_lo = compute_endP_for_d(lo) - target_end_pressure_torr
     f_hi = compute_endP_for_d(hi) - target_end_pressure_torr
 
-    # If we can't bracket the root, report clearly
-    if f_lo > 0 and f_hi > 0:
-        return None, f"Even at the smallest diameter (d={lo:g} cm), P_end is ABOVE target. Lower target or allow smaller d."
     if f_lo < 0 and f_hi < 0:
-        return None, f"Even at the largest diameter (d={hi:g} cm), P_end is BELOW target. Increase dmax or reduce Qm."
+        return None, "Even at the maximum diameter, the warm-end pressure is still below the target. Increase max diameter or reduce mass flow."
+    if f_lo > 0 and f_hi > 0:
+        return None, "Even at the minimum diameter, the warm-end pressure is above the target. Lower the target or allow a smaller minimum diameter."
 
-    # Bisection
     for _ in range(max_iter):
         mid = 0.5 * (lo + hi)
         f_mid = compute_endP_for_d(mid) - target_end_pressure_torr
@@ -215,11 +253,11 @@ def solve_diameter_for_target_end_pressure(df: pd.DataFrame, target_end_pressure
 
 
 # ----------------------------
-# UI: Table
+# Table UI
 # ----------------------------
 st.subheader("Pumping line sections")
 
-col_reset, col_space = st.columns([1, 8])
+col_reset, _ = st.columns([1, 8])
 with col_reset:
     if st.button("Reset to example"):
         st.session_state["segments_df"] = DEFAULT_SECTIONS.copy()
@@ -237,12 +275,12 @@ st.session_state["segments_df"] = df
 
 segments_preview = build_segments(df)
 
-# Always show schematic preview (even before compute)
-st.subheader("Schematic preview (updates live from the table)")
+# Always show schematic preview
+st.subheader("Schematic preview")
 st.pyplot(make_diagram(segments_preview, pressures=st.session_state["last_pressures"]), use_container_width=True)
 
 # ----------------------------
-# Buttons + Solve
+# Compute / Solve buttons
 # ----------------------------
 left, right = st.columns([1.2, 1])
 
@@ -251,23 +289,24 @@ with left:
         if st.button("Compute", type="primary"):
             run_forward_compute(segments_preview)
 
+        st.caption("Tip: Press **Compute** once to run the numerical calculation. If your browser didn’t refresh the diagram/results, press **Compute** again.")
+
     else:
-        # Solve for diameter mode
         st.markdown("### Solve: diameter of one section")
+
         section_names = list(df["name"].astype(str).values) if len(df) else []
         if not section_names:
-            st.warning("Add at least one section to solve.")
+            st.warning("Add at least one section first.")
         else:
-            section_to_solve = st.selectbox("Which section diameter to solve?", section_names, index=0)
+            section_to_solve = st.selectbox("Section to solve", section_names, index=0)
 
-            # Target end pressure choice
-            use_pump_target = st.checkbox("Use pump inlet pressure (q=pS) as target end pressure", value=True)
+            use_pump_target = st.checkbox("Use pump inlet pressure as the target warm-end pressure", value=True)
 
             if use_pump_target and show_pump:
                 target = n.pump_inlet_pressure_from_speed(Qm_g_s=Qm, gas=gas, T_K=Tp, S_L_s=S)
-                st.write(f"Target end pressure (pump inlet): **{target:.6g} torr**")
+                st.write(f"Target warm-end pressure: **{target:.6g} torr**")
             else:
-                target = st.number_input("Target warm-end pressure P_end (torr)", value=2e-3, format="%.6g")
+                target = st.number_input("Target warm-end pressure (torr)", value=2e-3, format="%.6g")
 
             dmin = st.number_input("Min diameter to try (cm)", value=0.2, format="%.6g")
             dmax = st.number_input("Max diameter to try (cm)", value=10.0, format="%.6g")
@@ -279,47 +318,42 @@ with left:
                     section_name=str(section_to_solve),
                     dmin_cm=float(dmin),
                     dmax_cm=float(dmax),
-                    max_iter=60
                 )
 
                 if d_sol is None:
                     st.error(msg)
                 else:
                     st.success(f"{msg}  Diameter for {section_to_solve}: **{d_sol:.4g} cm**")
-                    # Update table with solution
                     df2 = df.copy()
                     df2.loc[df2["name"] == section_to_solve, "diameter_cm"] = float(d_sol)
                     st.session_state["segments_df"] = df2
-                    # Recompute automatically so pressures/diagram update
-                    segments_new = build_segments(df2)
-                    run_forward_compute(segments_new)
+                    run_forward_compute(build_segments(df2))
                     st.rerun()
 
-# ----------------------------
-# Results + Errors
-# ----------------------------
 with right:
-    st.subheader("Design check (Eqs 2.18–2.19)")
+    st.subheader("Design check")
     try:
         ssum = n.sum_li_over_ai3(segments_preview)
         rhs = n.nunes_constraint_rhs(P0_torr=P0, T0_K=T0, Qm_g_s=Qm, gas=gas)
-        st.write(f"Σ(lᵢ / aᵢ³) = **{ssum:.6g} cm⁻²**")
-        st.write(f"Max allowed Σ = P0 / (c √T0 Qm) = **{rhs:.6g} cm⁻²**")
-        st.success("Constraint satisfied.") if ssum < rhs else st.error("Constraint fails.")
+        st.write(f"Restriction score Σ(l/a³): **{ssum:.6g} cm⁻²**")
+        st.write(f"Maximum allowed: **{rhs:.6g} cm⁻²**")
+        st.success("OK") if ssum < rhs else st.error("Too restrictive")
     except Exception as e:
         st.warning(f"Design check unavailable: {e}")
 
-    st.subheader("Pump block")
+    st.subheader("Pump")
     if show_pump:
         q = n.throughput_torr_L_s_from_massflow(Qm_g_s=Qm, gas=gas, T_K=Tp)
         Pin = n.pump_inlet_pressure_from_speed(Qm_g_s=Qm, gas=gas, T_K=Tp, S_L_s=S)
-        st.write(f"Throughput at pump inlet q = **{q:.6g} torr·L/s**")
-        st.write(f"Pump inlet pressure Pin = q/S = **{Pin:.6g} torr**")
+        st.write(f"Throughput q: **{q:.6g} torr·L/s**")
+        st.write(f"Pump inlet pressure: **{Pin:.6g} torr**")
         st.write(f"Pump outlet/backing pressure (display): **{Pback:.6g} torr**")
 
-# Show computed results (persisted)
+# ----------------------------
+# Results
+# ----------------------------
 if st.session_state["last_error"]:
-    st.error("Compute failed (infeasible design).")
+    st.error("Computation failed (inputs are too restrictive for the chosen mass flow).")
     st.warning(st.session_state["last_error"])
 
 if st.session_state["last_pressures"] is not None:
@@ -328,6 +362,6 @@ if st.session_state["last_pressures"] is not None:
     node_df = pd.DataFrame({"node": [f"P{i}" for i in range(len(pressures))], "P_torr": pressures})
     st.dataframe(node_df, use_container_width=True)
 
-    st.subheader("Per-slice diagnostics (regime + L/a)")
+    st.subheader("Diagnostics (advanced)")
     diag_df = pd.DataFrame(st.session_state["last_diag"])
     st.dataframe(diag_df, use_container_width=True, height=360)
