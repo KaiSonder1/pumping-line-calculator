@@ -1,8 +1,9 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle, Circle, FancyArrowPatch
+from matplotlib.patches import Rectangle, Circle, FancyArrowPatch, Polygon
 from typing import Tuple
+import math
 
 import nunes_pumping as n
 
@@ -15,27 +16,19 @@ DEFAULT_SECTIONS = pd.DataFrame([
     {"name":"L3", "length_cm":100.0, "diameter_cm":6.35, "T_in_K":4.2, "T_out_K":300.0,"substeps":60},
 ])
 
-# ----------------------------
-# Sidebar inputs
-# ----------------------------
 with st.sidebar:
     st.header("Inputs")
-
     gas_choice = st.selectbox("Helium isotope", ["He3", "He4"], index=0)
     gas = n.HE3 if gas_choice == "He3" else n.HE4
 
-    Qm = st.number_input(
-        "Mass flow (g/s)",
-        value=1.8e-5,
-        format="%.6g",
-        help="Mass flow = grams of helium per second moving through the line (steady state)."
-    )
+    Qm = st.number_input("Mass flow (g/s)", value=1.8e-5, format="%.6g",
+                         help="Mass flow = grams of helium per second through the line (steady state).")
     P0 = st.number_input("Cold-end pressure (torr)", value=1.9e-3, format="%.6g")
     T0 = st.number_input("Cold-end temperature (K)", value=0.3, format="%.6g")
 
     st.header("Model settings")
     eta_model = st.selectbox("Viscosity model", ["accurate", "simple"], index=0)
-    end_corr = st.checkbox("Short-tube correction (molecular flow)", value=True)
+    end_corr = st.checkbox("Short-tube correction (molecular flow)", value=True, help="(Not used in default pressure stepping.)")
 
     st.header("Pump (optional)")
     show_pump = st.checkbox("Compute pump inlet pressure from pump speed", value=True)
@@ -44,35 +37,21 @@ with st.sidebar:
     Pback = st.number_input("Pump outlet/backing pressure (torr) (display only)", value=760.0, format="%.6g")
 
     st.header("Solve for unknown")
-    solve_mode = st.selectbox(
-        "Mode",
-        ["Forward: compute pressures", "Solve: diameter of one section"],
-        index=0
-    )
+    solve_mode = st.selectbox("Mode", ["Forward: compute pressures", "Solve: diameter of one section"], index=0)
 
-# ----------------------------
-# Session state
-# ----------------------------
 if "segments_df" not in st.session_state:
     st.session_state["segments_df"] = DEFAULT_SECTIONS.copy()
-
 if "last_pressures" not in st.session_state:
     st.session_state["last_pressures"] = None
-
 if "last_diag" not in st.session_state:
     st.session_state["last_diag"] = None
-
 if "last_error" not in st.session_state:
     st.session_state["last_error"] = None
 
-
-# ----------------------------
-# Helpers
-# ----------------------------
 def build_segments(df: pd.DataFrame):
-    segments = []
+    segs = []
     for _, r in df.iterrows():
-        segments.append(n.Segment(
+        segs.append(n.Segment(
             name=str(r["name"]),
             length_cm=float(r["length_cm"]),
             diameter_cm=float(r["diameter_cm"]),
@@ -80,42 +59,59 @@ def build_segments(df: pd.DataFrame):
             T_out_K=float(r["T_out_K"]),
             substeps=int(r["substeps"]),
         ))
-    return segments
-
+    return segs
 
 def _spread_label_positions(xs_true, x_min, x_max, min_dx):
-    """Greedy spacing so labels never overlap horizontally."""
     idx_sorted = sorted(range(len(xs_true)), key=lambda i: xs_true[i])
     xs_sorted = [xs_true[i] for i in idx_sorted]
-
     xs_lab = []
     last = -1e99
     for x in xs_sorted:
         x_new = x if (x - last) >= min_dx else (last + min_dx)
         xs_lab.append(x_new)
         last = x_new
-
     overflow = xs_lab[-1] - x_max
     if overflow > 0:
         xs_lab = [x - overflow for x in xs_lab]
-
     under = x_min - xs_lab[0]
     if under > 0:
         xs_lab = [x + under for x in xs_lab]
-
     out = [0.0] * len(xs_true)
     for j, i in enumerate(idx_sorted):
         out[i] = xs_lab[j]
     return out
 
+def _draw_fan_pump(ax, cx, cy, r, label_lines):
+    # outer circle + hub
+    ax.add_patch(Circle((cx, cy), r, fill=False, linewidth=2))
+    ax.add_patch(Circle((cx, cy), 0.22*r, fill=False, linewidth=2))
+
+    # 4 blades (triangles)
+    for angle in [0, math.pi/2, math.pi, 3*math.pi/2]:
+        inner = 0.28*r
+        outer = 0.88*r
+        width = 0.30*r
+        bx = cx + inner*math.cos(angle)
+        by = cy + inner*math.sin(angle)
+        ox = -math.sin(angle)
+        oy = math.cos(angle)
+        p1 = (bx + 0.5*width*ox, by + 0.5*width*oy)
+        p2 = (bx - 0.5*width*ox, by - 0.5*width*oy)
+        tip = (cx + outer*math.cos(angle), cy + outer*math.sin(angle))
+        ax.add_patch(Polygon([p1, p2, tip], closed=True, fill=False, linewidth=1.5))
+
+    # little rotation arrow
+    ax.add_patch(FancyArrowPatch(
+        (cx + 0.2*r, cy + 0.95*r),
+        (cx + 0.8*r, cy + 0.55*r),
+        arrowstyle="->", mutation_scale=14, linewidth=1.5
+    ))
+
+    # label to the RIGHT (never on top of the line)
+    if label_lines:
+        ax.text(cx + 1.35*r, cy, "\n".join(label_lines), ha="left", va="center", fontsize=9)
 
 def make_diagram(segments, pressures=None, pump_info=None):
-    """
-    Scaled schematic:
-    - segments: rectangles (width = length_cm, height = diameter_cm)
-    - labels: spaced out + leader lines
-    - pump: scaled body + rotor symbol, sized relative to line length and max diameter
-    """
     if not segments:
         fig, ax = plt.subplots(figsize=(10, 3))
         ax.text(0.5, 0.5, "No sections defined", ha="center", va="center")
@@ -125,20 +121,19 @@ def make_diagram(segments, pressures=None, pump_info=None):
     total_L = sum(s.length_cm for s in segments)
     max_D = max(s.diameter_cm for s in segments)
 
-    # Pump sizing (scales with line length + diameter)
-    pump_w = max(0.18 * total_L, 3.5 * max_D)   # width in "cm-length units"
-    pump_h = 1.6 * max_D                        # height in "cm-diameter units"
-    gap = max(0.04 * total_L, 2.0 * max_D)      # spacing from end of line to pump
+    # pump radius scales with both length and diameter, but is bounded
+    r = max(0.9*max_D, 0.06*total_L)
+    r = min(r, 0.20*total_L)  # cap so it never becomes absurdly huge
+    gap = max(0.05*total_L, 1.2*max_D)
 
-    pump_x0 = total_L + gap
-    pump_x1 = pump_x0 + pump_w
-    x_max = pump_x1 + 0.06 * total_L
+    pump_cx = total_L + gap + r
+    x_max = pump_cx + 2.2*r + 0.06*total_L  # room for labels
 
-    fig_w = max(11, min(22, (x_max) / 10))
+    fig_w = max(11, min(22, x_max / 10))
     fig_h = 5.2
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    # Draw segments
+    # draw tube segments
     x0 = 0.0
     mids, top_y_at_mid, boundaries = [], [], [0.0]
     for seg in segments:
@@ -149,9 +144,9 @@ def make_diagram(segments, pressures=None, pump_info=None):
         x0 += L
         boundaries.append(x0)
 
-    # Labels: spread out and connect with leader lines
+    # labels (spread)
     min_dx = max(18.0, 0.22 * (total_L / max(1, len(segments))))
-    label_xs = _spread_label_positions(mids, x_min=0.0, x_max=total_L, min_dx=min_dx)
+    label_xs = _spread_label_positions(mids, 0.0, total_L, min_dx)
     y_label = max_D/2 + 0.60*max_D
 
     for i, seg in enumerate(segments):
@@ -167,60 +162,34 @@ def make_diagram(segments, pressures=None, pump_info=None):
             ha="center", va="bottom", fontsize=8
         )
 
-    # Node pressures (staggered)
+    # node pressures (staggered)
     if pressures is not None and len(pressures) == len(boundaries):
         for i, xb in enumerate(boundaries):
             yoff = (-max_D/2 - 0.30*max_D) if (i % 2 == 0) else (-max_D/2 - 0.46*max_D)
             ax.text(xb, yoff, f"P{i}={pressures[i]:.3g} torr", ha="center", va="top", fontsize=8)
 
-    # Connection line to pump
-    ax.plot([total_L, pump_x0], [0, 0], linewidth=2)
+    # connection to pump
+    ax.plot([total_L, pump_cx - r], [0, 0], linewidth=2)
 
-    # Pump body (scaled)
-    ax.add_patch(Rectangle((pump_x0, -pump_h/2), pump_w, pump_h, fill=False, linewidth=2))
-    ax.text((pump_x0 + pump_x1)/2, pump_h/2 + 0.20*max_D, "PUMP", ha="center", va="bottom", fontsize=10)
+    # pump labels
+    pump_lines = []
+    if pump_info:
+        pump_lines.append(f"S = {pump_info.get('S_L_s', 0):.3g} L/s")
+        pump_lines.append(f"T = {pump_info.get('Tp_K', 0):.3g} K")
+        Pin = pump_info.get("Pin_torr", None)
+        q = pump_info.get("q_torrL_s", None)
+        if Pin is not None:
+            pump_lines.append(f"Pin = {Pin:.3g} torr")
+        if q is not None:
+            pump_lines.append(f"q = {q:.3g} torr·L/s")
 
-    # Rotor inside pump (scaled)
-    cx = pump_x0 + 0.38 * pump_w
-    cy = 0.0
-    r_outer = 0.32 * pump_h
-    r_inner = 0.16 * pump_h
-
-    ax.add_patch(Circle((cx, cy), r_outer, fill=False, linewidth=2))
-    ax.add_patch(Circle((cx + 0.10*r_outer, cy), r_inner, fill=False, linewidth=1.5))
-
-    # vane/rotation arrow
-    ax.add_patch(FancyArrowPatch(
-        (cx - 0.20*r_outer, cy + 0.15*r_outer),
-        (cx + 0.35*r_outer, cy + 0.15*r_outer),
-        arrowstyle="->",
-        mutation_scale=14,
-        linewidth=1.5
-    ))
-
-    # Pump label (specs)
-    if pump_info is None:
-        pump_info = {}
-
-    lines = []
-    if "S_L_s" in pump_info:
-        lines.append(f"S = {pump_info['S_L_s']:.3g} L/s")
-    if "Tp_K" in pump_info:
-        lines.append(f"T = {pump_info['Tp_K']:.3g} K")
-    if "Pin_torr" in pump_info and pump_info["Pin_torr"] is not None:
-        lines.append(f"Pin = {pump_info['Pin_torr']:.3g} torr")
-    if "q_torrL_s" in pump_info and pump_info["q_torrL_s"] is not None:
-        lines.append(f"q = {pump_info['q_torrL_s']:.3g} torr·L/s")
-
-    if lines:
-        ax.text(pump_x0 + 0.72*pump_w, -0.05*pump_h, "\n".join(lines), ha="left", va="top", fontsize=9)
+    _draw_fan_pump(ax, pump_cx, 0.0, r, pump_lines)
 
     ax.set_xlim(0, x_max)
     ax.set_ylim(-max_D - 0.85*max_D, y_label + 0.60*max_D)
     ax.axis("off")
     ax.set_title("Pumping line schematic", fontsize=12)
     return fig
-
 
 def run_forward_compute(segments):
     st.session_state["last_error"] = None
@@ -231,7 +200,6 @@ def run_forward_compute(segments):
             P0_torr=P0,
             Qm_g_s=Qm,
             eta_model=eta_model,
-            use_end_correction=end_corr,
         )
         st.session_state["last_pressures"] = pressures
         st.session_state["last_diag"] = diags
@@ -240,29 +208,13 @@ def run_forward_compute(segments):
         st.session_state["last_diag"] = None
         st.session_state["last_error"] = str(e)
 
-
-def solve_diameter_for_target_end_pressure(
-    df: pd.DataFrame,
-    target_end_pressure_torr: float,
-    section_name: str,
-    dmin_cm: float,
-    dmax_cm: float,
-    max_iter: int = 60
-) -> Tuple[float | None, str]:
-
+def solve_diameter_for_target_end_pressure(df, target_end_pressure_torr, section_name, dmin_cm, dmax_cm, max_iter=60) -> Tuple[float | None, str]:
     def compute_endP_for_d(d_cm: float) -> float:
         df2 = df.copy()
         df2.loc[df2["name"] == section_name, "diameter_cm"] = float(d_cm)
         segs = build_segments(df2)
         try:
-            pressures, _ = n.propagate_line(
-                segments=segs,
-                gas=gas,
-                P0_torr=P0,
-                Qm_g_s=Qm,
-                eta_model=eta_model,
-                use_end_correction=end_corr,
-            )
+            pressures, _ = n.propagate_line(segs, gas=gas, P0_torr=P0, Qm_g_s=Qm, eta_model=eta_model)
             return pressures[-1]
         except n.InfeasibleFlowError:
             return 0.0
@@ -291,23 +243,19 @@ def solve_diameter_for_target_end_pressure(
 
     return 0.5 * (lo + hi), "Solved (max iterations reached)."
 
-
 # ----------------------------
-# Table UI (FIXED: non-glitchy editing)
+# Table UI (non-glitchy editing)
 # ----------------------------
 st.subheader("Pumping line sections")
 
-col_reset, col_hint = st.columns([1, 6])
-with col_reset:
-    if st.button("Reset to example"):
-        st.session_state["segments_df"] = DEFAULT_SECTIONS.copy()
-        st.session_state["last_pressures"] = None
-        st.session_state["last_diag"] = None
-        st.session_state["last_error"] = None
-        st.rerun()
+if st.button("Reset to example"):
+    st.session_state["segments_df"] = DEFAULT_SECTIONS.copy()
+    st.session_state["last_pressures"] = None
+    st.session_state["last_diag"] = None
+    st.session_state["last_error"] = None
+    st.rerun()
 
-with col_hint:
-    st.caption("Editing tip: change values in the table, then click **Apply table changes**. This prevents edits from being lost while the app reruns.")
+st.caption("Editing tip: change values in the table, then click **Apply table changes**.")
 
 with st.form("table_form", clear_on_submit=False):
     edited_df = st.data_editor(
@@ -320,7 +268,6 @@ with st.form("table_form", clear_on_submit=False):
 
 if apply_clicked:
     st.session_state["segments_df"] = edited_df
-    # Clear results so the user knows they need to recompute
     st.session_state["last_pressures"] = None
     st.session_state["last_diag"] = None
     st.session_state["last_error"] = None
@@ -329,7 +276,6 @@ if apply_clicked:
 df = st.session_state["segments_df"]
 segments_preview = build_segments(df)
 
-# Pump info for diagram label
 pump_info = {"S_L_s": float(S), "Tp_K": float(Tp), "Pin_torr": None, "q_torrL_s": None}
 if show_pump:
     pump_info["q_torrL_s"] = float(n.throughput_torr_L_s_from_massflow(Qm_g_s=Qm, gas=gas, T_K=Tp))
@@ -338,52 +284,39 @@ if show_pump:
 st.subheader("Schematic preview")
 st.pyplot(make_diagram(segments_preview, pressures=st.session_state["last_pressures"], pump_info=pump_info), use_container_width=True)
 
-# ----------------------------
-# Compute / Solve buttons
-# ----------------------------
 left, right = st.columns([1.2, 1])
 
 with left:
     if solve_mode == "Forward: compute pressures":
         if st.button("Compute", type="primary"):
             run_forward_compute(segments_preview)
-        st.caption("Tip: Press **Compute** once for the calculation. If the diagram/results didn't update, press **Compute** again.")
+        st.caption("Tip: Press **Compute** once for the calculation. If the diagram/results didn’t update, press **Compute** again.")
     else:
         st.markdown("### Solve: diameter of one section")
-
         section_names = list(df["name"].astype(str).values) if len(df) else []
-        if not section_names:
-            st.warning("Add at least one section first.")
+        section_to_solve = st.selectbox("Section to solve", section_names, index=0)
+
+        use_pump_target = st.checkbox("Use pump inlet pressure as target warm-end pressure", value=True)
+        if use_pump_target and show_pump:
+            target = n.pump_inlet_pressure_from_speed(Qm_g_s=Qm, gas=gas, T_K=Tp, S_L_s=S)
+            st.write(f"Target warm-end pressure: **{target:.6g} torr**")
         else:
-            section_to_solve = st.selectbox("Section to solve", section_names, index=0)
-            use_pump_target = st.checkbox("Use pump inlet pressure as target warm-end pressure", value=True)
+            target = st.number_input("Target warm-end pressure (torr)", value=2e-3, format="%.6g")
 
-            if use_pump_target and show_pump:
-                target = n.pump_inlet_pressure_from_speed(Qm_g_s=Qm, gas=gas, T_K=Tp, S_L_s=S)
-                st.write(f"Target warm-end pressure: **{target:.6g} torr**")
+        dmin = st.number_input("Min diameter to try (cm)", value=0.2, format="%.6g")
+        dmax = st.number_input("Max diameter to try (cm)", value=10.0, format="%.6g")
+
+        if st.button("Solve diameter", type="primary"):
+            d_sol, msg = solve_diameter_for_target_end_pressure(df, float(target), str(section_to_solve), float(dmin), float(dmax))
+            if d_sol is None:
+                st.error(msg)
             else:
-                target = st.number_input("Target warm-end pressure (torr)", value=2e-3, format="%.6g")
-
-            dmin = st.number_input("Min diameter to try (cm)", value=0.2, format="%.6g")
-            dmax = st.number_input("Max diameter to try (cm)", value=10.0, format="%.6g")
-
-            if st.button("Solve diameter", type="primary"):
-                d_sol, msg = solve_diameter_for_target_end_pressure(
-                    df=df,
-                    target_end_pressure_torr=float(target),
-                    section_name=str(section_to_solve),
-                    dmin_cm=float(dmin),
-                    dmax_cm=float(dmax),
-                )
-                if d_sol is None:
-                    st.error(msg)
-                else:
-                    st.success(f"{msg}  Diameter for {section_to_solve}: **{d_sol:.4g} cm**")
-                    df2 = df.copy()
-                    df2.loc[df2["name"] == section_to_solve, "diameter_cm"] = float(d_sol)
-                    st.session_state["segments_df"] = df2
-                    run_forward_compute(build_segments(df2))
-                    st.rerun()
+                st.success(f"{msg}  Diameter for {section_to_solve}: **{d_sol:.4g} cm**")
+                df2 = df.copy()
+                df2.loc[df2["name"] == section_to_solve, "diameter_cm"] = float(d_sol)
+                st.session_state["segments_df"] = df2
+                run_forward_compute(build_segments(df2))
+                st.rerun()
 
 with right:
     st.subheader("Design check")
@@ -407,11 +340,8 @@ with right:
         st.write(f"Pump inlet pressure: **{Pin:.6g} torr**")
         st.write(f"Pump outlet/backing pressure (display): **{Pback:.6g} torr**")
 
-# ----------------------------
-# Results
-# ----------------------------
 if st.session_state["last_error"]:
-    st.error("Computation failed (inputs are too restrictive for the chosen mass flow).")
+    st.error("Computation failed.")
     st.warning(st.session_state["last_error"])
 
 if st.session_state["last_pressures"] is not None:
