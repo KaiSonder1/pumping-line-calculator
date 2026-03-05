@@ -1,10 +1,10 @@
-Cryogenic Pumping Line Calculator (public link via Streamlit Community Cloud)
+Cryogenic Pumping Line Calculator
 ==========================================================================
 
 What this is
 ------------
-A small web app (Streamlit) that implements the equations from Geoffrey Nunes, Jr.,
-"Pumps and Plumbing" (chapter you photographed), to propagate pressure through
+A  web app (Streamlit) that implements the equations from Geoffrey Nunes, Jr.,
+"Pumps and Plumbing", to propagate pressure through
 a multi-section pumping line with temperature gradients.
 
 Files
