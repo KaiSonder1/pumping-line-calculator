@@ -337,10 +337,10 @@ with right:
         rhs = n.nunes_constraint_rhs(P0_torr=P0, T0_K=T0, Qm_g_s=Qm, gas=gas)
         st.write(f"Restriction score Σ(l/a³): **{ssum:.6g} cm⁻²**")
         st.write(f"Maximum allowed: **{rhs:.6g} cm⁻²**")
-        sif ssum < rhs:
-    st.success("OK")
-else:
-    st.error("Too restrictive")
+        if ssum < rhs:
+            st.success("OK")
+        else:
+            st.error("Too restrictive")
     except Exception as e:
         st.warning(f"Design check unavailable: {e}")
 
