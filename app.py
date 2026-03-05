@@ -9,9 +9,12 @@ st.set_page_config(page_title="Cryogenic Pumping Line Calculator", layout="wide"
 st.title("Cryogenic Pumping Line Calculator (Nunes chapter, section-by-section)")
 
 st.markdown("""
-Model the pumping line as a **series of sections** (Fig. 2.15 style).
-Each section has: **length (cm), diameter (cm), T_in (K), T_out (K)**.
-Then we compute pressures across the line and draw a stepped technical diagram (Fig. 2.16 style).
+This calculator models a cryogenic pumping line as a **series of sections** (Fig. 2.15 style),
+and draws a stepped technical schematic (Fig. 2.16 style).
+
+- Each section has: **length (cm), diameter (cm), T_in (K), T_out (K)**
+- You provide: **cold-end pressure P0 (torr)** and **mass flow Qm (g/s)**
+- The app computes **P_in → P_out** across each section and overlays pressures on the schematic.
 """)
 
 DEFAULT_SECTIONS = pd.DataFrame([
@@ -20,8 +23,12 @@ DEFAULT_SECTIONS = pd.DataFrame([
     {"name":"L3", "length_cm":100.0, "diameter_cm":6.35, "T_in_K":4.2, "T_out_K":300.0,"substeps":60},
 ])
 
+# ----------------------------
+# Sidebar inputs
+# ----------------------------
 with st.sidebar:
     st.header("Global inputs")
+
     gas_choice = st.selectbox("Gas", ["He3", "He4"], index=0)
     gas = n.HE3 if gas_choice == "He3" else n.HE4
 
@@ -34,29 +41,37 @@ with st.sidebar:
     end_corr = st.checkbox("Apply short-tube correction in molecular flow (Eq 2.11 idea)", value=True)
 
     st.header("Pump block (optional)")
-    show_pump = st.checkbox("Show pump inlet pressure from pump speed (q = pS)", value=True)
+    show_pump = st.checkbox("Compute pump inlet pressure from pump speed (q = pS)", value=True)
     Tp = st.number_input("Pump inlet temperature (K)", value=300.0, format="%.3f")
     S = st.number_input("Pump speed S (L/s)", value=500.0, format="%.6g")
     Pback = st.number_input("Pump outlet/backing pressure (torr) (display only)", value=760.0, format="%.6g")
 
-st.subheader("Pumping line sections")
+    st.header("Solve for unknown")
+    solve_mode = st.selectbox(
+        "Mode",
+        ["Forward: compute pressures", "Solve: diameter of one section"],
+        index=0
+    )
 
+# ----------------------------
+# State
+# ----------------------------
 if "segments_df" not in st.session_state:
     st.session_state["segments_df"] = DEFAULT_SECTIONS.copy()
 
-col_reset, col_spacer = st.columns([1, 6])
-with col_reset:
-    if st.button("Reset to example"):
-        st.session_state["segments_df"] = DEFAULT_SECTIONS.copy()
-        st.rerun()
+if "last_pressures" not in st.session_state:
+    st.session_state["last_pressures"] = None
 
-df = st.data_editor(
-    st.session_state["segments_df"],
-    num_rows="dynamic",
-    use_container_width=True
-)
-st.session_state["segments_df"] = df
+if "last_diag" not in st.session_state:
+    st.session_state["last_diag"] = None
 
+if "last_error" not in st.session_state:
+    st.session_state["last_error"] = None
+
+
+# ----------------------------
+# Helpers
+# ----------------------------
 def build_segments(df: pd.DataFrame):
     segments = []
     for _, r in df.iterrows():
@@ -70,101 +85,229 @@ def build_segments(df: pd.DataFrame):
         ))
     return segments
 
-def make_diagram(segments, pressures=None):
-    # Horizontal stepped diagram: width = length, height = diameter
-    total_L = sum(s.length_cm for s in segments)
-    max_D = max(s.diameter_cm for s in segments) if segments else 1.0
 
-    fig_w = max(8, min(16, total_L / 15))
-    fig_h = 3.5
+def make_diagram(segments, pressures=None):
+    """Stepped schematic like Fig. 2.16. Draws each segment as a rectangle."""
+    if not segments:
+        fig, ax = plt.subplots(figsize=(10, 3))
+        ax.text(0.5, 0.5, "No segments", ha="center", va="center")
+        ax.axis("off")
+        return fig
+
+    total_L = sum(s.length_cm for s in segments)
+    max_D = max(s.diameter_cm for s in segments)
+
+    fig_w = max(9, min(18, total_L / 12))
+    fig_h = 3.8
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
     x = 0.0
     for i, seg in enumerate(segments):
         d = seg.diameter_cm
-        ax.add_patch(Rectangle((x, -d/2), seg.length_cm, d, fill=False, linewidth=2))
+        L = seg.length_cm
 
-        # Labels
-        ax.text(x + seg.length_cm/2, d/2 + 0.15*max_D,
-                f"{seg.name}\nL={seg.length_cm:g} cm\nD={d:g} cm\nT: {seg.T_in_K:g}→{seg.T_out_K:g} K",
-                ha="center", va="bottom", fontsize=8)
+        # Tube outline
+        ax.add_patch(Rectangle((x, -d/2), L, d, fill=False, linewidth=2))
 
-        # Node pressure labels
+        # Segment label
+        ax.text(
+            x + L/2, d/2 + 0.12*max_D,
+            f"{seg.name}  (L={L:g} cm, D={d:g} cm)\nT: {seg.T_in_K:g} → {seg.T_out_K:g} K",
+            ha="center", va="bottom", fontsize=8
+        )
+
+        # Pressure at left node
         if pressures is not None and i < len(pressures):
-            ax.text(x, -d/2 - 0.2*max_D, f"P{i}={pressures[i]:.3g} torr",
-                    ha="left", va="top", fontsize=8)
+            ax.text(
+                x, -d/2 - 0.18*max_D,
+                f"P{i}={pressures[i]:.3g} torr",
+                ha="left", va="top", fontsize=8
+            )
 
-        x += seg.length_cm
+        x += L
 
+    # Pressure at final node
     if pressures is not None:
-        ax.text(x, -max_D/2 - 0.2*max_D, f"P{len(pressures)-1}={pressures[-1]:.3g} torr",
-                ha="right", va="top", fontsize=8)
+        ax.text(
+            total_L, -max_D/2 - 0.18*max_D,
+            f"P{len(pressures)-1}={pressures[-1]:.3g} torr",
+            ha="right", va="top", fontsize=8
+        )
 
     ax.set_xlim(0, total_L)
     ax.set_ylim(-max_D, max_D)
     ax.axis("off")
-    ax.set_title("Pumping line schematic (stepped diameters, like Fig. 2.16)", fontsize=12)
+    ax.set_title("Pumping line schematic (stepped sections, Fig. 2.16 style)", fontsize=12)
     return fig
 
-left, right = st.columns([1.2, 1])
 
-with left:
-    if st.button("Compute", type="primary"):
-        segments = build_segments(df)
+def run_forward_compute(segments):
+    """Compute pressures and store results in session_state."""
+    st.session_state["last_error"] = None
+    try:
+        pressures, diags = n.propagate_line(
+            segments=segments,
+            gas=gas,
+            P0_torr=P0,
+            Qm_g_s=Qm,
+            eta_model=eta_model,
+            use_end_correction=end_corr,
+        )
+        st.session_state["last_pressures"] = pressures
+        st.session_state["last_diag"] = diags
+    except n.InfeasibleFlowError as e:
+        st.session_state["last_pressures"] = None
+        st.session_state["last_diag"] = None
+        st.session_state["last_error"] = str(e)
 
-        # Basic sanity checks
-        for s in segments:
-            if s.length_cm <= 0 or s.diameter_cm <= 0 or s.T_in_K <= 0 or s.T_out_K <= 0:
-                st.error("All lengths, diameters, and temperatures must be > 0.")
-                st.stop()
 
+def solve_diameter_for_target_end_pressure(df: pd.DataFrame, target_end_pressure_torr: float, section_name: str,
+                                          dmin_cm: float, dmax_cm: float, max_iter: int = 50) -> Tuple[float, str]:
+    """
+    Solve for diameter of one section so that final pressure P_end matches target_end_pressure_torr.
+    Uses bisection on diameter. Assumes P_end increases with diameter (true for this model).
+    """
+    if dmin_cm <= 0 or dmax_cm <= dmin_cm:
+        return None, "Diameter bounds invalid."
+
+    def compute_endP_for_d(d_cm: float) -> float:
+        df2 = df.copy()
+        df2.loc[df2["name"] == section_name, "diameter_cm"] = float(d_cm)
+        segs = build_segments(df2)
         try:
-            pressures, diags = n.propagate_line(
-                segments=segments,
+            pressures, _ = n.propagate_line(
+                segments=segs,
                 gas=gas,
                 P0_torr=P0,
                 Qm_g_s=Qm,
                 eta_model=eta_model,
                 use_end_correction=end_corr,
             )
+            return pressures[-1]
+        except n.InfeasibleFlowError:
+            # If infeasible, treat as "too restrictive": end pressure effectively ~0
+            return 0.0
 
-            st.success("Computed successfully.")
+    lo, hi = dmin_cm, dmax_cm
+    f_lo = compute_endP_for_d(lo) - target_end_pressure_torr
+    f_hi = compute_endP_for_d(hi) - target_end_pressure_torr
 
-            st.subheader("Node pressures (torr)")
-            node_df = pd.DataFrame({
-                "node": [f"P{i}" for i in range(len(pressures))],
-                "P_torr": pressures,
-            })
-            st.dataframe(node_df, use_container_width=True)
+    # If we can't bracket the root, report clearly
+    if f_lo > 0 and f_hi > 0:
+        return None, f"Even at the smallest diameter (d={lo:g} cm), P_end is ABOVE target. Lower target or allow smaller d."
+    if f_lo < 0 and f_hi < 0:
+        return None, f"Even at the largest diameter (d={hi:g} cm), P_end is BELOW target. Increase dmax or reduce Qm."
 
-            st.subheader("Technical schematic")
-            fig = make_diagram(segments, pressures=pressures)
-            st.pyplot(fig, use_container_width=True)
+    # Bisection
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        f_mid = compute_endP_for_d(mid) - target_end_pressure_torr
+        if abs(f_mid) < 1e-6:
+            return mid, "Solved."
+        if f_lo * f_mid <= 0:
+            hi = mid
+            f_hi = f_mid
+        else:
+            lo = mid
+            f_lo = f_mid
 
-            st.subheader("Per-slice diagnostics (regime + L/a)")
-            diag_df = pd.DataFrame(diags)
-            st.dataframe(diag_df, use_container_width=True, height=360)
+    return 0.5 * (lo + hi), "Solved (max iterations reached)."
 
-        except n.InfeasibleFlowError as e:
-            st.error("This set of inputs is physically infeasible for the model (pressure collapses to ~0).")
-            st.warning(str(e))
-            st.info("Try: reduce Qm, increase diameter of the narrowest section, shorten that section, or reset to the example.")
-        except Exception as e:
-            st.error("Unexpected error:")
-            st.exception(e)
 
+# ----------------------------
+# UI: Table
+# ----------------------------
+st.subheader("Pumping line sections")
+
+col_reset, col_space = st.columns([1, 8])
+with col_reset:
+    if st.button("Reset to example"):
+        st.session_state["segments_df"] = DEFAULT_SECTIONS.copy()
+        st.session_state["last_pressures"] = None
+        st.session_state["last_diag"] = None
+        st.session_state["last_error"] = None
+        st.rerun()
+
+df = st.data_editor(
+    st.session_state["segments_df"],
+    num_rows="dynamic",
+    use_container_width=True
+)
+st.session_state["segments_df"] = df
+
+segments_preview = build_segments(df)
+
+# Always show schematic preview (even before compute)
+st.subheader("Schematic preview (updates live from the table)")
+st.pyplot(make_diagram(segments_preview, pressures=st.session_state["last_pressures"]), use_container_width=True)
+
+# ----------------------------
+# Buttons + Solve
+# ----------------------------
+left, right = st.columns([1.2, 1])
+
+with left:
+    if solve_mode == "Forward: compute pressures":
+        if st.button("Compute", type="primary"):
+            run_forward_compute(segments_preview)
+
+    else:
+        # Solve for diameter mode
+        st.markdown("### Solve: diameter of one section")
+        section_names = list(df["name"].astype(str).values) if len(df) else []
+        if not section_names:
+            st.warning("Add at least one section to solve.")
+        else:
+            section_to_solve = st.selectbox("Which section diameter to solve?", section_names, index=0)
+
+            # Target end pressure choice
+            use_pump_target = st.checkbox("Use pump inlet pressure (q=pS) as target end pressure", value=True)
+
+            if use_pump_target and show_pump:
+                target = n.pump_inlet_pressure_from_speed(Qm_g_s=Qm, gas=gas, T_K=Tp, S_L_s=S)
+                st.write(f"Target end pressure (pump inlet): **{target:.6g} torr**")
+            else:
+                target = st.number_input("Target warm-end pressure P_end (torr)", value=2e-3, format="%.6g")
+
+            dmin = st.number_input("Min diameter to try (cm)", value=0.2, format="%.6g")
+            dmax = st.number_input("Max diameter to try (cm)", value=10.0, format="%.6g")
+
+            if st.button("Solve diameter", type="primary"):
+                d_sol, msg = solve_diameter_for_target_end_pressure(
+                    df=df,
+                    target_end_pressure_torr=float(target),
+                    section_name=str(section_to_solve),
+                    dmin_cm=float(dmin),
+                    dmax_cm=float(dmax),
+                    max_iter=60
+                )
+
+                if d_sol is None:
+                    st.error(msg)
+                else:
+                    st.success(f"{msg}  Diameter for {section_to_solve}: **{d_sol:.4g} cm**")
+                    # Update table with solution
+                    df2 = df.copy()
+                    df2.loc[df2["name"] == section_to_solve, "diameter_cm"] = float(d_sol)
+                    st.session_state["segments_df"] = df2
+                    # Recompute automatically so pressures/diagram update
+                    segments_new = build_segments(df2)
+                    run_forward_compute(segments_new)
+                    st.rerun()
+
+# ----------------------------
+# Results + Errors
+# ----------------------------
 with right:
     st.subheader("Design check (Eqs 2.18–2.19)")
-    segments_preview = build_segments(df)
-    ssum = n.sum_li_over_ai3(segments_preview)
-    rhs = n.nunes_constraint_rhs(P0_torr=P0, T0_K=T0, Qm_g_s=Qm, gas=gas)
-
-    st.write(f"Σ(lᵢ / aᵢ³) = **{ssum:.6g} cm⁻²**")
-    st.write(f"Max allowed Σ = P0 / (c √T0 Qm) = **{rhs:.6g} cm⁻²**")
-    if ssum < rhs:
-        st.success("Constraint satisfied.")
-    else:
-        st.error("Constraint fails (increase diameter / shorten narrow sections / reduce Qm).")
+    try:
+        ssum = n.sum_li_over_ai3(segments_preview)
+        rhs = n.nunes_constraint_rhs(P0_torr=P0, T0_K=T0, Qm_g_s=Qm, gas=gas)
+        st.write(f"Σ(lᵢ / aᵢ³) = **{ssum:.6g} cm⁻²**")
+        st.write(f"Max allowed Σ = P0 / (c √T0 Qm) = **{rhs:.6g} cm⁻²**")
+        st.success("Constraint satisfied.") if ssum < rhs else st.error("Constraint fails.")
+    except Exception as e:
+        st.warning(f"Design check unavailable: {e}")
 
     st.subheader("Pump block")
     if show_pump:
@@ -173,3 +316,18 @@ with right:
         st.write(f"Throughput at pump inlet q = **{q:.6g} torr·L/s**")
         st.write(f"Pump inlet pressure Pin = q/S = **{Pin:.6g} torr**")
         st.write(f"Pump outlet/backing pressure (display): **{Pback:.6g} torr**")
+
+# Show computed results (persisted)
+if st.session_state["last_error"]:
+    st.error("Compute failed (infeasible design).")
+    st.warning(st.session_state["last_error"])
+
+if st.session_state["last_pressures"] is not None:
+    st.subheader("Computed node pressures (torr)")
+    pressures = st.session_state["last_pressures"]
+    node_df = pd.DataFrame({"node": [f"P{i}" for i in range(len(pressures))], "P_torr": pressures})
+    st.dataframe(node_df, use_container_width=True)
+
+    st.subheader("Per-slice diagnostics (regime + L/a)")
+    diag_df = pd.DataFrame(st.session_state["last_diag"])
+    st.dataframe(diag_df, use_container_width=True, height=360)
